@@ -11,20 +11,23 @@ using UnityEngine.UI;
 public class Stream : MonoBehaviour
 {
     public ARCameraManager arCameraManager;
-    public string backendUrlInput = "192.168.1.5:8000";
+    public string backendUrlInput = "192.168.1.15:8000";
     public Text fpsText;
     public Text screenInfoText; // Add this line
-    public ARPlaneManager arPlaneManager;      // Add this line
-    public ARRaycastManager arRaycastManager;  // Add this line
+    public ARPlaneManager planeManager; // Add this line
+    public ARRaycastManager raycastManager; // Add this line
+    public Button calibrationButton; // Add this line
+    private bool isCalibrationMode = false; // Add this line
+    // Remove the chessboardPrefab declaration
+    // public GameObject chessboardPrefab; // Remove this line
 
-    private float realScreenWidth = 296f; // Add this line
-    private float realScreenHeight = 640f; // Add this line
+    public float realScreenWidth = 296f; // Add this line
+    public float realScreenHeight = 640f; // Add this line
     private WebSocket ws;
     private int frameCount = 0;
     private float elapsedTime = 0.0f;
     private List<Vector2> points = new List<Vector2>(); // Change this line
-    private List<Vector3> cornerPositions = new List<Vector3>(); // Store the 3D corner positions
-    private GameObject virtualChessboard; // Add this line
+    private GameObject chessboard; // Add this line
 
     // Start is called once before the first execution of Update after the MonoBehaviour is created
     void Start()
@@ -50,11 +53,13 @@ public class Stream : MonoBehaviour
 
         // Display screen width and height
         screenInfoText.text = $"Screen Width: {Screen.width}, Screen Height: {Screen.height}"; // Add this line
+        planeManager = FindFirstObjectByType<ARPlaneManager>(); // Add this line
+        raycastManager = FindFirstObjectByType<ARRaycastManager>(); // Add this line
+        chessboard = GameObject.CreatePrimitive(PrimitiveType.Cube); // Add this line
+        chessboard.SetActive(false); // Add this line
 
-        // Create a simple 3D plane for the virtual chessboard
-        virtualChessboard = GameObject.CreatePrimitive(PrimitiveType.Plane);
-        virtualChessboard.transform.localScale = new Vector3(0.5f, 1f, 0.5f); // Adjust as needed
-        virtualChessboard.SetActive(false); // Disable initially
+        calibrationButton.onClick.AddListener(ToggleCalibrationMode); // Add this line
+        UpdateScreenInfoText(); // Add this line
     }
 
     // Update is called once per frame
@@ -68,36 +73,11 @@ public class Stream : MonoBehaviour
             frameCount = 0;
             elapsedTime = 0.0f;
         }
-
-        // Example: Attempt to back-project and align chessboard once we have four 2D corners
-        if (points.Count == 4)
+        if (isCalibrationMode && planeManager.trackables.count > 0 && points.Count == 4) // Modify this line
         {
-            cornerPositions.Clear();
-            foreach (var point2D in points)
-            {
-                // Convert 2D screen coords to a ray
-                Vector3 screenPoint = new Vector3(
-                    point2D.x / realScreenWidth * Screen.width,
-                    point2D.y / realScreenHeight * Screen.height,
-                    0f
-                );
-                Ray ray = Camera.main.ScreenPointToRay(screenPoint);
-
-                var hits = new List<ARRaycastHit>();
-                // Cast against detected planes
-                if (arRaycastManager.Raycast(ray, hits, TrackableType.Planes))
-                {
-                    // Take the first hit
-                    cornerPositions.Add(hits[0].pose.position);
-                }
-            }
-
-            // If we have four 3D points, align the chessboard
-            if (cornerPositions.Count == 4)
-            {
-                AlignChessboard3D(cornerPositions);
-            }
+            PlaceChessboard();
         }
+        // ...existing code...
     }
 
     private string accessImage()
@@ -155,7 +135,7 @@ public class Stream : MonoBehaviour
 
     private IEnumerator streamImage()
     {
-        while (true)
+        while (true && isCalibrationMode)
         {
             string base64Image = accessImage();
             if (base64Image != null)
@@ -167,7 +147,7 @@ public class Stream : MonoBehaviour
                 ws.Send(imageBytes);
                 frameCount++; // Increment frame count for each image sent
             }
-            yield return new WaitForSeconds(1f); // Adjust the interval as needed
+            yield return new WaitForSeconds(0.5f); // Adjust the interval as needed
         }
     }
 
@@ -181,6 +161,7 @@ public class Stream : MonoBehaviour
 
     void OnGUI()
     {
+        int pointSize = 20;
         // Draw the points on the screen
         foreach (var point in points)
         {
@@ -190,31 +171,63 @@ public class Stream : MonoBehaviour
 
             // Draw the point
             GUI.color = Color.red;
-            GUI.DrawTexture(new Rect(screenX - 5, screenY - 5, 10, 10), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(screenX - 5, screenY - 5, pointSize, pointSize), Texture2D.whiteTexture);
         }
     }
 
-    // Example method to align a custom chessboard object in the scene
-    private void AlignChessboard3D(List<Vector3> cornerPositions)
+    private void ToggleCalibrationMode() // Add this method
     {
-        // Compute center
-        Vector3 center = Vector3.zero;
-        foreach (var pos in cornerPositions) center += pos;
-        center /= cornerPositions.Count;
+        isCalibrationMode = !isCalibrationMode;
+        UpdateScreenInfoText();
+    }
 
-        // Compute normal of the plane
-        Vector3 normal = Vector3.Cross(cornerPositions[1] - cornerPositions[0], cornerPositions[2] - cornerPositions[0]).normalized;
+    private void UpdateScreenInfoText() // Add this method
+    {
+        screenInfoText.text = $"Screen Width: {Screen.width}, Screen Height: {Screen.height}\n" +
+                              $"Mode: {(isCalibrationMode ? "Calibration" : "Normal")}";
+    }
 
-        // For simplicity, place the chessboard at the center of the corners
-        if (virtualChessboard != null)
+    private void PlaceChessboard() // Modify this block
+    {
+        if (!isCalibrationMode) return; // Add this line
+
+        var worldPoints = new List<Vector3>();
+        foreach (var p in points)
         {
-            virtualChessboard.SetActive(true);
-            virtualChessboard.transform.position = center;
+            var screenPos = new Vector2(p.x / realScreenWidth * Screen.width,
+                                        p.y / realScreenHeight * Screen.height);
+            var hits = new List<ARRaycastHit>();
+            if (raycastManager.Raycast(screenPos, hits, TrackableType.Planes))
+            {
+                worldPoints.Add(hits[0].pose.position);
 
-            // Align the chessboard to the plane
-            virtualChessboard.transform.rotation = Quaternion.LookRotation(normal);
+                // Draw the raycast line
+                Debug.DrawLine(Camera.main.transform.position, hits[0].pose.position, Color.green, 2f);
+            }
+        }
+        if (worldPoints.Count == 4)
+        {
+            Vector3 center = (worldPoints[0] + worldPoints[1] + worldPoints[2] + worldPoints[3]) / 4f;
+            Vector3 forward = (worldPoints[1] - worldPoints[0]).normalized;
+            Vector3 right = Vector3.Cross((worldPoints[2] - worldPoints[0]).normalized, Vector3.up).normalized;
+            Vector3 up = Vector3.Cross(right, forward).normalized;
+            Quaternion rotation = Quaternion.LookRotation(forward, up);
 
-            // Additional orientation math could go here...
+            // Calculate the maximum size to ensure the cube is square
+            float maxSize = Mathf.Max(Vector3.Distance(worldPoints[0], worldPoints[1]), Vector3.Distance(worldPoints[0], worldPoints[2]));
+
+            // Adjust the center position to be on the plane
+            center.y = worldPoints[0].y;
+
+            // Place the chessboard
+            if (chessboard == null)
+            {
+                chessboard = new GameObject("Chessboard");
+                // Add necessary components to the chessboard
+            }
+            chessboard.transform.position = center;
+            chessboard.transform.rotation = rotation;
+            chessboard.transform.localScale = new Vector3(maxSize, 1, maxSize);
         }
     }
 
