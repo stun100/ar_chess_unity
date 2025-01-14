@@ -8,11 +8,13 @@ using UnityEngine.XR.ARSubsystems;
 using WebSocketSharp;
 using UnityEngine.UI;
 using UnityEditor;
+using UnityEngine.Networking; // Add this line
 
 public class Stream : MonoBehaviour
 {
     public ARCameraManager arCameraManager;
     public string backendUrlInput = "192.168.1.15:8000";
+    public string endPointCalibration = "calibration";
     public Text fpsText;
     public Text screenInfoText; // Add this line
     public ARPlaneManager planeManager; // Add this line
@@ -29,7 +31,11 @@ public class Stream : MonoBehaviour
     public Button toggleBoardButton; // Add this line
     private MeshRenderer boardRenderer; // Add this line
     private bool isBoardVisible = true; // Add this line
+    public Button togglePlaneDetectionButton; // Add this line
+    private bool isPlaneDetectionActive = true; // Add this line
+    public Button startButton; // Add this line
     private WebSocket ws;
+    private WebSocket chessMoveWs; // Add this line
     private int frameCount = 0;
     private float elapsedTime = 0.0f;
     private List<Vector2> points = new List<Vector2>(); // Change this line
@@ -46,29 +52,15 @@ public class Stream : MonoBehaviour
     private Quaternion initialRotation; // Add this line
     private string lastFromCell = ""; // Add this line
     private string lastToCell = ""; // Add this line
+    public Button whiteTurnButton; // Add this line
+    public Button blackTurnButton; // Add this line
+    private string playerTurn = "w"; // Add this line
+    private Vector2 bottomLeftCorner = new Vector2(-99, -99); // Add this line
+    private string bestMove = ""; // Add this line
 
     // Start is called once before the first execution of Update after the MonoBehaviour is created
     void Start()
     {
-        ws = new WebSocket($"ws://{backendUrlInput}/stream");
-        ws.OnMessage += (sender, e) =>
-        {
-            Debug.Log("Response: " + e.Data);
-            // Parse the response to get the points
-            var response = JsonUtility.FromJson<ResponseData>(e.Data);
-            points.Clear();
-            foreach (var point in response.corners)
-            {
-                points.Add(new Vector2(point.center_x, point.center_y));
-            }
-        };
-        ws.OnError += (sender, e) =>
-        {
-            Debug.Log("Error: " + e.Message);
-        };
-        ws.Connect();
-        StartCoroutine(streamImage());
-
         // Display screen width and height
         screenInfoText.text = $"Screen Width: {Screen.width}, Screen Height: {Screen.height}"; // Add this line
         planeManager = FindFirstObjectByType<ARPlaneManager>(); // Add this line
@@ -85,6 +77,10 @@ public class Stream : MonoBehaviour
         zSlider.onValueChanged.AddListener(OnZSliderChanged); // Add this line
         boardRenderer = chessboard.GetComponent<MeshRenderer>(); // Add this line
         UpdateScreenInfoText(); // Add this line
+        togglePlaneDetectionButton.onClick.AddListener(TogglePlaneDetection); // Add this line
+        startButton.onClick.AddListener(OnStartButtonClicked); // Add this line
+        whiteTurnButton.onClick.AddListener(() => SetPlayerTurn("w")); // Add this line
+        blackTurnButton.onClick.AddListener(() => SetPlayerTurn("b")); // Add this line
     }
 
     // Update is called once per frame
@@ -185,6 +181,10 @@ public class Stream : MonoBehaviour
         {
             ws.Close();
         }
+        if (chessMoveWs != null) // Add this line
+        {
+            chessMoveWs.Close();
+        }
     }
 
     void OnGUI()
@@ -210,6 +210,45 @@ public class Stream : MonoBehaviour
     {
         isCalibrationMode = !isCalibrationMode;
         UpdateScreenInfoText();
+
+        if (isCalibrationMode)
+        {
+            // Close the chess move WebSocket if it is open
+            if (chessMoveWs != null)
+            {
+                chessMoveWs.Close();
+                chessMoveWs = null;
+            }
+
+            // Open the WebSocket connection when calibration mode is enabled
+            ws = new WebSocket($"ws://{backendUrlInput}/{endPointCalibration}");
+            ws.OnMessage += (sender, e) =>
+            {
+                Debug.Log("Response: " + e.Data);
+                // Parse the response to get the points
+                var response = JsonUtility.FromJson<ResponseData>(e.Data);
+                points.Clear();
+                foreach (var point in response.corners)
+                {
+                    points.Add(new Vector2(point.center_x, point.center_y));
+                }
+            };
+            ws.OnError += (sender, e) =>
+            {
+                Debug.Log("Error: " + e.Message);
+            };
+            ws.Connect();
+            StartCoroutine(streamImage());
+        }
+        else
+        {
+            // Close the WebSocket connection when calibration mode is disabled
+            if (ws != null)
+            {
+                ws.Close();
+                ws = null;
+            }
+        }
     }
 
     private void OnXSliderChanged(float value) // Modify this method
@@ -237,10 +276,10 @@ public class Stream : MonoBehaviour
     {
         scale = value;
         UpdateChessboardTransform();
-        
+
         // Recalculate cell size
         cellSize = chessboard.transform.localScale.x / gridSize;
-        
+
         // Recreate colored cells if they exist
         UpdateAllColoredCells();
     }
@@ -262,10 +301,12 @@ public class Stream : MonoBehaviour
         }
     }
 
-    private void UpdateScreenInfoText() // Add this method
+    private void UpdateScreenInfoText() // Modify this method
     {
         screenInfoText.text = $"Screen Width: {Screen.width}, Screen Height: {Screen.height}\n" +
-                              $"Mode: {(isCalibrationMode ? "Calibration" : "Normal")}";
+                              $"Mode: {(isCalibrationMode ? "Calibration" : "Normal")}\n" +
+                              $"Player Turn: {playerTurn}\n" +
+                              $"Best Move: {bestMove}";
     }
 
     private void PlaceChessboard() // Modify this block
@@ -353,20 +394,20 @@ public class Stream : MonoBehaviour
         // Store the coordinates for later use
         lastFromCell = from;
         lastToCell = to;
-        
+
         Vector2Int fromCoords = ChessNotationToGridCoordinates(from);
         Vector2Int toCoords = ChessNotationToGridCoordinates(to);
 
         // Calculate positions relative to the board scale
         float scaledCellSize = chessboard.transform.localScale.x / gridSize;
-        
+
         Vector3 fromPosition = chessboard.transform.position +
-                              chessboard.transform.right * (fromCoords.x - gridSize/2 + 0.5f) * scaledCellSize +
-                              chessboard.transform.forward * (fromCoords.y - gridSize/2 + 0.5f) * scaledCellSize;
-                              
+                              chessboard.transform.right * (fromCoords.x - gridSize / 2 + 0.5f) * scaledCellSize +
+                              chessboard.transform.forward * (fromCoords.y - gridSize / 2 + 0.5f) * scaledCellSize;
+
         Vector3 toPosition = chessboard.transform.position +
-                            chessboard.transform.right * (toCoords.x - gridSize/2 + 0.5f) * scaledCellSize +
-                            chessboard.transform.forward * (toCoords.y - gridSize/2 + 0.5f) * scaledCellSize;
+                            chessboard.transform.right * (toCoords.x - gridSize / 2 + 0.5f) * scaledCellSize +
+                            chessboard.transform.forward * (toCoords.y - gridSize / 2 + 0.5f) * scaledCellSize;
 
         ColorCell(fromPosition, Color.blue);
         ColorCell(toPosition, Color.red);
@@ -394,40 +435,15 @@ public class Stream : MonoBehaviour
         float amplitude = 0.004f;
         float frequency = 2f;
 
-        while (true)
+        while (cell != null) // Add this check
         {
+            if (cell == null) yield break; // Exit if the cell is destroyed
+
             float yOffset = Mathf.Sin(Time.time * frequency) * amplitude;
             // Animate around the raised position
             cell.transform.position = startPosition + new Vector3(0, yOffset, 0);
             yield return null;
         }
-    }
-
-    public void PlaceSmallCubes(string from, string to) // Modify this method
-    {
-        Vector2Int fromCoords = ChessNotationToGridCoordinates(from);
-        Vector2Int toCoords = ChessNotationToGridCoordinates(to);
-
-        Vector3 fromPosition = chessboard.transform.position +
-                               chessboard.transform.right * (fromCoords.x * cellSize - chessboard.transform.localScale.x / 2 + cellSize / 2) +
-                               chessboard.transform.forward * (fromCoords.y * cellSize - chessboard.transform.localScale.z / 2 + cellSize / 2);
-        Vector3 toPosition = chessboard.transform.position +
-                             chessboard.transform.right * (toCoords.x * cellSize - chessboard.transform.localScale.x / 2 + cellSize / 2) +
-                             chessboard.transform.forward * (toCoords.y * cellSize - chessboard.transform.localScale.z / 2 + cellSize / 2);
-
-        GameObject fromCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        fromCube.transform.position = fromPosition;
-        fromCube.transform.rotation = chessboard.transform.rotation; // Add this line
-        fromCube.transform.localScale = new Vector3(cellSize / 2, cellSize / 2, cellSize / 2);
-        fromCube.GetComponent<Renderer>().material.color = Color.blue;
-        placedCubes.Add(fromCube); // Add this line
-
-        GameObject toCube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        toCube.transform.position = toPosition;
-        toCube.transform.rotation = chessboard.transform.rotation; // Add this line
-        toCube.transform.localScale = new Vector3(cellSize / 2, cellSize / 2, cellSize / 2);
-        toCube.GetComponent<Renderer>().material.color = Color.blue;
-        placedCubes.Add(toCube); // Add this line
     }
 
     private Vector2Int ChessNotationToGridCoordinates(string notation) // Add this method
@@ -556,9 +572,147 @@ public class Stream : MonoBehaviour
                 Destroy(cube);
             }
             placedCubes.Clear();
-            
+
             // Recreate cells with new transformations
             PlaceColoredCells(lastFromCell, lastToCell);
         }
+    }
+
+    private void UpdateAllColoredCells2(string start, string end) // Add this method
+    {
+        if (!string.IsNullOrEmpty(start) && !string.IsNullOrEmpty(end))
+        {
+            // Clear existing cells
+            foreach (var cube in placedCubes)
+            {
+                Destroy(cube);
+            }
+            placedCubes.Clear();
+
+            // Recreate cells with new transformations
+            PlaceColoredCells(start, end);
+        }
+    }
+
+    private void TogglePlaneDetection() // Add this method
+    {
+        isPlaneDetectionActive = !isPlaneDetectionActive;
+        planeManager.enabled = isPlaneDetectionActive;
+
+        foreach (var plane in planeManager.trackables)
+        {
+            plane.gameObject.SetActive(isPlaneDetectionActive);
+        }
+    }
+
+    private void OnStartButtonClicked() // Modify this method
+    {
+        // Capture the image data
+        string base64Image = accessImage();
+        if (base64Image == null)
+        {
+            Debug.LogError("Failed to capture image.");
+            bestMove = "Failed";
+            UpdateScreenInfoText();
+            return;
+        }
+
+        // Sort the points
+        if (points.Count == 4)
+        {
+            points.Sort((a, b) => a.y.CompareTo(b.y)); // Sort by y-coordinate
+            if (points[0].x > points[1].x) (points[0], points[1]) = (points[1], points[0]); // Sort top points by x-coordinate
+            if (points[2].x > points[3].x) (points[2], points[3]) = (points[3], points[2]); // Sort bottom points by x-coordinate
+        }
+
+        List<float> bottomLeft = new List<float> { points[2].x, points[2].y };
+        List<float> bottomRight = new List<float> { points[3].x, points[3].y };
+        List<float> topLeft = new List<float> { points[0].x, points[0].y };
+        List<float> topRight = new List<float> { points[1].x, points[1].y };
+
+        Debug.Log("Bottom Left: " + bottomLeft[0] + ", " + bottomLeft[1]);
+        Debug.Log("Bottom Right: " + bottomRight[0] + ", " + bottomRight[1]);
+        Debug.Log("Top Left: " + topLeft[0] + ", " + topLeft[1]);
+        Debug.Log("Top Right: " + topRight[0] + ", " + topRight[1]);
+
+        // Create the JSON object
+        var chessMoveData = new ChessMoveRequest
+        {
+            image_data = base64Image,
+            bottom_left = bottomLeft,
+            bottom_right = bottomRight,
+            top_left = topLeft,
+            top_right = topRight,
+            player_turn = playerTurn
+        };
+
+        // Send the JSON object over HTTP POST request
+        StartCoroutine(SendChessMoveRequest(chessMoveData));
+    }
+
+    private IEnumerator SendChessMoveRequest(ChessMoveRequest chessMoveData) // Add this method
+    {
+        string jsonData = JsonUtility.ToJson(chessMoveData);
+        using (UnityWebRequest request = new UnityWebRequest($"http://{backendUrlInput}/chess_move", "POST"))
+        {
+            byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(jsonData);
+            request.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+
+            yield return request.SendWebRequest();
+
+            if (request.result == UnityWebRequest.Result.Success)
+            {
+                Debug.Log("Chess Move Response: " + request.downloadHandler.text);
+                try
+                {
+                    ChessMoveResponse response = JsonUtility.FromJson<ChessMoveResponse>(request.downloadHandler.text);
+
+                    // Access the start_pos and end_pos
+                    Debug.Log("Start Position: " + response.start_pos);
+                    Debug.Log("End Position: " + response.end_pos);
+                    bestMove = $"Start: {response.start_pos}, End: {response.end_pos}";
+                    UpdateAllColoredCells2(response.start_pos, response.end_pos);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("Failed to parse response: " + ex.Message);
+                    bestMove = "Failed";
+                }
+            }
+            else
+            {
+                Debug.LogError("Chess Move Error: " + request.error);
+                bestMove = "Failed";
+            }
+            UpdateScreenInfoText();
+        }
+    }
+
+    private void SetPlayerTurn(string turn) // Add this method
+    {
+        playerTurn = turn;
+        UpdateScreenInfoText();
+    }
+
+    [Serializable]
+    private class ChessMoveRequest // Modify this class
+    {
+        public string image_data;
+        public List<float> bottom_left;
+        public List<float> bottom_right;
+        public List<float> top_left;
+        public List<float> top_right;
+        public string player_turn;
+    }
+
+    [Serializable]
+    public class ChessMoveResponse
+    {
+        public string turn;
+        public string start_pos;
+        public string end_pos;
+        public string fen;
     }
 }
